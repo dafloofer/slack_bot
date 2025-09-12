@@ -193,7 +193,7 @@ def main():
             return
   
         if args.get_channels:
-            chans = list_channels(token, args.channel_type)
+            chans = list_channels(token, args.channel_types)
             # print id + name
             out = [{"id": c["id"], "name": c.get("name"), "is_private": c.get("is_private")} for c in chans]
             print(json.dumps(out, indent=2) if args.pretty else json.dumps(out))
