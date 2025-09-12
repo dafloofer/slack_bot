@@ -55,8 +55,9 @@ def get_bot_user_id(token):
         raise RuntimeError(f"auth.test failed: {data}")
     return data["user_id"]
 
-def list_channels(token, types="public_channel,private_channel"):
-    """Return list of channels the token can see. Each item includes id + name + is_private, etc."""
+def list_channels(token, types="public_channel,private_channel", only_member=False, bot_user_id=None):
+    """Return list of channels the token can see. If only_member=True, filter to channels
+    the bot user is a member of (uses channel['is_member'] when present; otherwise checks members)."""
     channels = []
     cursor = None
     while True:
@@ -70,7 +71,31 @@ def list_channels(token, types="public_channel,private_channel"):
         cursor = (data.get("response_metadata") or {}).get("next_cursor")
         if not cursor:
             break
-    return channels
+
+    if not only_member:
+        return channels
+
+    # Filter to channels where the *bot user* is a member.
+    if not bot_user_id:
+        bot_user_id = get_bot_user_id(token)
+
+    filtered = []
+    for ch in channels:
+        # Fast path: Slack may include is_member on list results
+        if "is_member" in ch:
+            if ch.get("is_member"):
+                filtered.append(ch)
+            continue
+        # Fallback: explicit membership check (costly; only used when needed)
+        try:
+            if is_bot_member(token, ch["id"], bot_user_id):
+                ch["is_member"] = True
+                filtered.append(ch)
+        except Exception:
+            # If we cannot determine membership (scope/permission), skip to be strict.
+            pass
+    return filtered
+
 
 def resolve_channel_id(token, channel_arg):
     """Resolve channel id from ID or name ('general')."""
@@ -206,6 +231,13 @@ def main():
               "Default: public_channel,private_channel"),
     )
 
+    p.add_argument(
+    "--only-member",
+    action="store_true",
+    help="When used with --get_channels, only include channels the bot is a member of",
+)
+
+
     # NEW: bulk input/output options
     p.add_argument("--tokens-file", help="Path to file with one token per line (used with --check_valid_bulk)")
     p.add_argument("--out", help="Write bulk results to this JSONL file (one JSON object per line)")
@@ -280,10 +312,11 @@ def main():
         token = args.token
 
         if args.get_channels:
-            chans = list_channels(token, args.channel_types)
-            out = [{"id": c["id"], "name": c.get("name"), "is_private": c.get("is_private")} for c in chans]
+            chans = list_channels(token, args.channel_types, only_member=args.only_member)
+            out = [{"id": c["id"], "name": c.get("name"), "is_private": c.get("is_private"), "is_member": c.get("is_member")} for c in chans]
             print(json.dumps(out, indent=2) if args.pretty else json.dumps(out))
             return
+
 
         if args.get_messages:
             if not args.channel:
