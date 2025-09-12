@@ -4,6 +4,7 @@ slack_bot_tool.py
 
 Actions:
   --check_valid          : verify token with a benign API call
+  --check_valid_bulk     : verify MANY tokens from --tokens-file (newline/CR/CRLF separated)
   --get_channels         : list channels the bot can see
   --get_messages         : last 10 messages (requires --channel)
   --get_rights           : summarize rights in context of a channel (requires --channel)
@@ -34,15 +35,18 @@ def slack_call(token, method, params=None, http_method="GET"):
         else:
             # Slack prefers application/x-www-form-urlencoded for many endpoints,
             # but JSON works for most read ops too. We'll default to form to be safe.
-            r = requests.post(url, headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
-                              data=params or {}, timeout=30)
+            r = requests.post(
+                url,
+                headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
+                data=params or {},
+                timeout=30,
+            )
         if r.status_code == 429:
             retry = int(r.headers.get("Retry-After", "1"))
             time.sleep(retry)
             continue
         r.raise_for_status()
-        data = r.json()
-        return data
+        return r.json()
     raise RuntimeError("Slack API rate limited too many times")
 
 def get_bot_user_id(token):
@@ -160,12 +164,35 @@ def dump_messages(token, channel_id, channel_label, weeks=1):
             count += 1
     return out_name, count
 
+# --------- NEW: bulk token helpers ---------
+
+def _read_tokens_file(path):
+    """Read tokens from file (newline/CR/CRLF). Blank lines and lines starting with # are ignored."""
+    toks = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh.read().splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            toks.append(s)
+    return toks
+
+def _mask_token(t):
+    """Mask a token for safer logging: keep first 6 and last 4 chars when long enough."""
+    if not t:
+        return ""
+    if len(t) <= 12:
+        return t[0:2] + "***"
+    return f"{t[:6]}...{t[-4:]}"
+
 def main():
     p = argparse.ArgumentParser(description="Slack bot token helper")
-    p.add_argument("--token", required=True, help="Slack bot token (xoxb-...)")
+    # NOTE: --token is NOT required globally (bulk mode uses --tokens-file instead)
+    p.add_argument("--token", help="Slack bot token (xoxb-...)")
     
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--check_valid", action="store_true", help="Check token validity")
+    g.add_argument("--check_valid_bulk", action="store_true", help="Check MANY tokens from --tokens-file")
     g.add_argument("--get_channels", action="store_true", help="List channels")
     g.add_argument("--get_messages", action="store_true", help="Get last 10 messages from --channel")
     g.add_argument("--get_rights", action="store_true", help="Show rights context for --channel")
@@ -174,27 +201,86 @@ def main():
     p.add_argument(
         "--channel_types",
         default="public_channel,private_channel",
-        help="Comma-separated conversation types for conversations.list "
-             "(e.g. public_channel,private_channel,im,mpim). Default: public_channel,private_channel",
+        help=("Comma-separated conversation types for conversations.list "
+              "(e.g. public_channel,private_channel,im,mpim). "
+              "Default: public_channel,private_channel"),
     )
-    
+
+    # NEW: bulk input/output options
+    p.add_argument("--tokens-file", help="Path to file with one token per line (used with --check_valid_bulk)")
+    p.add_argument("--out", help="Write bulk results to this JSONL file (one JSON object per line)")
+    p.add_argument("--show-tokens", action="store_true", help="Include raw tokens in output (default masks them)")
+
     p.add_argument("--channel", help="Channel ID (C?/G?/D?) or name (e.g. general) when required")
     p.add_argument("--timeframe", type=int, default=1, help="Weeks of history for --dump_messages (default 1)")
     p.add_argument("--pretty", action="store_true", help="Pretty-print JSON output where applicable")
 
     args = p.parse_args()
 
-    token = args.token
-
     try:
+        # ------- single-token check -------
         if args.check_valid:
-            data = slack_call(token, "auth.test", http_method="POST")
+            if not args.token:
+                raise ValueError("--token is required for --check_valid")
+            data = slack_call(args.token, "auth.test", http_method="POST")
             print(json.dumps(data, indent=2) if args.pretty else json.dumps(data))
             return
-  
+
+        # ------- bulk token check -------
+        if args.check_valid_bulk:
+            if not args.tokens_file:
+                raise ValueError("--tokens-file is required for --check_valid_bulk")
+            tokens = _read_tokens_file(args.tokens_file)
+            if not tokens:
+                raise ValueError(f"No tokens found in {args.tokens_file}")
+
+            # Prepare output sink (stdout or JSONL file)
+            outfh = None
+            try:
+                if args.out:
+                    outfh = open(args.out, "w", encoding="utf-8")
+
+                for tok in tokens:
+                    result = {"ok": False}
+                    try:
+                        resp = slack_call(tok, "auth.test", http_method="POST")
+                        # Slack returns ok:false with error string for invalid tokens (HTTP 200)
+                        result = {
+                            "ok": bool(resp.get("ok")),
+                            "error": resp.get("error"),
+                            "team": resp.get("team"),
+                            "team_id": resp.get("team_id"),
+                            "user_id": resp.get("user_id"),
+                            "url": resp.get("url"),
+                        }
+                    except Exception as e:
+                        result = {"ok": False, "error": str(e)}
+
+                    # token display (masked by default)
+                    if args.show_tokens:
+                        result["token"] = tok
+                    else:
+                        result["token_masked"] = _mask_token(tok)
+
+                    line = json.dumps(result, ensure_ascii=False)
+                    if outfh:
+                        outfh.write(line + "\n")
+                    else:
+                        print(line)
+            finally:
+                if outfh:
+                    outfh.close()
+            # Done
+            return
+
+        # ------- everything below requires a single token -------
+        if not args.token:
+            raise ValueError("--token is required for this action")
+
+        token = args.token
+
         if args.get_channels:
             chans = list_channels(token, args.channel_types)
-            # print id + name
             out = [{"id": c["id"], "name": c.get("name"), "is_private": c.get("is_private")} for c in chans]
             print(json.dumps(out, indent=2) if args.pretty else json.dumps(out))
             return
@@ -216,11 +302,13 @@ def main():
             info = get_channel_info(token, ch_id)
             member = is_bot_member(token, ch_id, bot_id)
 
-            # Infer rights (without sending messages)
             token_scopes = set(scopes.get("scopes", []))
-            can_read = "channels:history" in token_scopes or "groups:history" in token_scopes or "conversations.history:read" in token_scopes or "conversations.history" in token_scopes
-            # Slack standard bot scopes often use "channels:history"/"groups:history" (classic) or granular "conversations.history".
-            # Posting typically requires 'chat:write' or 'chat:write.public' (granular).
+            can_read = (
+                "channels:history" in token_scopes
+                or "groups:history" in token_scopes
+                or "conversations.history:read" in token_scopes
+                or "conversations.history" in token_scopes
+            )
             can_post = ("chat:write" in token_scopes or "chat:write.public" in token_scopes) and member
 
             result = {
@@ -241,8 +329,8 @@ def main():
                 raise ValueError("--channel is required for --dump_messages")
             ch_id, ch_label = resolve_channel_id(token, args.channel)
             out_name, count = dump_messages(token, ch_id, ch_label, weeks=args.timeframe)
-            print(json.dumps({"output_file": out_name, "messages_written": count}, indent=2) if args.pretty
-                  else json.dumps({"output_file": out_name, "messages_written": count}))
+            result = {"output_file": out_name, "messages_written": count}
+            print(json.dumps(result, indent=2) if args.pretty else json.dumps(result))
             return
 
     except Exception as e:
