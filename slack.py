@@ -165,6 +165,7 @@ def main():
     p.add_argument("--token", required=True, help="Slack bot token (xoxb-...)")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--check_valid", action="store_true", help="Check token validity")
+    g.add_argument("--channel_type", action="store_true", help="Check token validity", default="public_channel,private_channel")
     g.add_argument("--get_channels", action="store_true", help="List channels")
     g.add_argument("--get_messages", action="store_true", help="Get last 10 messages from --channel")
     g.add_argument("--get_rights", action="store_true", help="Show rights context for --channel")
@@ -181,9 +182,9 @@ def main():
             data = slack_call(token, "auth.test", http_method="POST")
             print(json.dumps(data, indent=2) if args.pretty else json.dumps(data))
             return
-
+  
         if args.get_channels:
-            chans = list_channels(token)
+            chans = list_channels(token, args.channel_type)
             # print id + name
             out = [{"id": c["id"], "name": c.get("name"), "is_private": c.get("is_private")} for c in chans]
             print(json.dumps(out, indent=2) if args.pretty else json.dumps(out))
