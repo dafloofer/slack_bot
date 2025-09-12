@@ -163,16 +163,25 @@ def dump_messages(token, channel_id, channel_label, weeks=1):
 def main():
     p = argparse.ArgumentParser(description="Slack bot token helper")
     p.add_argument("--token", required=True, help="Slack bot token (xoxb-...)")
+    
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--check_valid", action="store_true", help="Check token validity")
-    g.add_argument("--channel_type", action="store_true", help="Check token validity", default="public_channel,private_channel")
     g.add_argument("--get_channels", action="store_true", help="List channels")
     g.add_argument("--get_messages", action="store_true", help="Get last 10 messages from --channel")
     g.add_argument("--get_rights", action="store_true", help="Show rights context for --channel")
     g.add_argument("--dump_messages", action="store_true", help="Dump messages from --channel over timeframe")
-    p.add_argument("--channel", help="Channel ID (C?/G?) or name (e.g. general) when required")
+    
+    p.add_argument(
+        "--channel_types",
+        default="public_channel,private_channel",
+        help="Comma-separated conversation types for conversations.list "
+             "(e.g. public_channel,private_channel,im,mpim). Default: public_channel,private_channel",
+    )
+    
+    p.add_argument("--channel", help="Channel ID (C?/G?/D?) or name (e.g. general) when required")
     p.add_argument("--timeframe", type=int, default=1, help="Weeks of history for --dump_messages (default 1)")
     p.add_argument("--pretty", action="store_true", help="Pretty-print JSON output where applicable")
+
     args = p.parse_args()
 
     token = args.token
