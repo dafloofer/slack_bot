@@ -307,8 +307,6 @@ def main():
     p = argparse.ArgumentParser(description="Slack bot token helper")
     # NOTE: --token is NOT required globally (bulk mode uses --tokens-file instead)
     p.add_argument("--token", help="Slack bot token (xoxb-...)")
-    p.add_argument("--count", type=int, default=10,
-               help="Number of recent parent messages to return with --get_messages (default 10)")
     p.add_argument("--include-replies", action="store_true",
                 help="Also fetch thread replies for returned parent messages")
     p.add_argument("--flatten-replies", action="store_true",
