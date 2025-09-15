@@ -24,7 +24,87 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 API_BASE = "https://slack.com/api"
-SLACK_HISTORY_MAX_LIMIT = 1000  # Slack's max per conversations.history call
+SLACK_HISTORY_MAX_LIMIT = 1000  # per-call limit
+
+def get_recent_messages(token, channel_id, count=10):
+    """Return up to `count` most recent parent messages."""
+    count = max(1, int(count or 1))
+    if count <= SLACK_HISTORY_MAX_LIMIT:
+        return get_last_messages(token, channel_id, limit=count)
+    out = []
+    for m in iter_history(token, channel_id):
+        out.append(m)
+        if len(out) >= count:
+            break
+    return out
+
+def fetch_thread_replies(token, channel_id, thread_ts, max_replies=None, include_root=False):
+    """
+    Fetch replies in a thread. By default, excludes the root (parent) message.
+    Returns a list sorted newest->older as Slack provides per page.
+    """
+    replies = []
+    cursor = None
+    fetched = 0
+    while True:
+        params = {
+            "channel": channel_id,
+            "ts": thread_ts,
+            "limit": 200,
+            "include_all_metadata": True,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        data = slack_call(token, "conversations.replies", params, http_method="GET")
+        if not data.get("ok"):
+            raise RuntimeError(f"conversations.replies failed: {data}")
+        page = data.get("messages", []) or []
+        if not include_root:
+            page = [m for m in page if m.get("ts") != thread_ts]
+        for m in page:
+            replies.append(m)
+            fetched += 1
+            if max_replies and fetched >= max_replies:
+                break
+        if max_replies and fetched >= max_replies:
+            break
+        cursor = (data.get("response_metadata") or {}).get("next_cursor")
+        if not cursor or not page:
+            break
+    return replies
+
+def expand_replies(token, channel_id, parents, flatten=False, max_replies=None):
+    """
+    For each parent message with a thread, fetch replies and either:
+      - attach as m['replies'] = [...], or
+      - flatten into a single list with thread annotations.
+    """
+    if not flatten:
+        out = []
+        for m in parents:
+            out.append(m)
+            if (m.get("reply_count") or 0) > 0 or (m.get("thread_ts") == m.get("ts")):
+                th_ts = m.get("thread_ts") or m.get("ts")
+                reps = fetch_thread_replies(token, channel_id, th_ts, max_replies=max_replies, include_root=False)
+                m["replies"] = reps
+        return out
+
+    # flatten mode
+    flat = []
+    for m in parents:
+        root = dict(m)
+        root["thread_level"] = 0
+        flat.append(root)
+        if (m.get("reply_count") or 0) > 0 or (m.get("thread_ts") == m.get("ts")):
+            th_ts = m.get("thread_ts") or m.get("ts")
+            reps = fetch_thread_replies(token, channel_id, th_ts, max_replies=max_replies, include_root=False)
+            for r in reps:
+                rr = dict(r)
+                rr["thread_parent"] = th_ts
+                rr["thread_level"] = 1
+                flat.append(rr)
+    return flat
+
 
 def get_recent_messages(token, channel_id, count=10):
     """Return up to `count` most recent messages. Uses single call if count<=1000, otherwise paginates."""
@@ -203,7 +283,6 @@ def dump_messages(token, channel_id, channel_label, weeks=1):
             count += 1
     return out_name, count
 
-# --------- NEW: bulk token helpers ---------
 
 def _read_tokens_file(path):
     """Read tokens from file (newline/CR/CRLF). Blank lines and lines starting with # are ignored."""
@@ -228,7 +307,15 @@ def main():
     p = argparse.ArgumentParser(description="Slack bot token helper")
     # NOTE: --token is NOT required globally (bulk mode uses --tokens-file instead)
     p.add_argument("--token", help="Slack bot token (xoxb-...)")
-    
+    p.add_argument("--count", type=int, default=10,
+               help="Number of recent parent messages to return with --get_messages (default 10)")
+    p.add_argument("--include-replies", action="store_true",
+                help="Also fetch thread replies for returned parent messages")
+    p.add_argument("--flatten-replies", action="store_true",
+                help="Flatten replies into the top list (adds thread_parent/thread_level)")
+    p.add_argument("--max-replies", type=int,
+                help="Per-thread cap on number of replies to fetch (default: all)")
+
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--check_valid", action="store_true", help="Check token validity")
     g.add_argument("--check_valid_bulk", action="store_true", help="Check MANY tokens from --tokens-file")
@@ -321,7 +408,6 @@ def main():
             finally:
                 if outfh:
                     outfh.close()
-            # Done
             return
 
         # ------- everything below requires a single token -------
@@ -341,9 +427,18 @@ def main():
             if not args.channel:
                 raise ValueError("--channel is required for --get_messages")
             ch_id, ch_label = resolve_channel_id(token, args.channel)
-            msgs = get_recent_messages(token, ch_id, count=args.count)
+            parents = get_recent_messages(token, ch_id, count=args.count)
+            if args.include_replies:
+                msgs = expand_replies(
+                    token, ch_id, parents,
+                    flatten=args.flatten_replies,
+                    max_replies=args.max_replies
+                )
+            else:
+                msgs = parents
             print(json.dumps(msgs, indent=2) if args.pretty else json.dumps(msgs))
             return
+
 
 
         if args.get_rights:
