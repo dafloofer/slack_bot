@@ -24,6 +24,20 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 API_BASE = "https://slack.com/api"
+SLACK_HISTORY_MAX_LIMIT = 1000  # Slack's max per conversations.history call
+
+def get_recent_messages(token, channel_id, count=10):
+    """Return up to `count` most recent messages. Uses single call if count<=1000, otherwise paginates."""
+    count = max(1, int(count or 1))
+    if count <= SLACK_HISTORY_MAX_LIMIT:
+        return get_last_messages(token, channel_id, limit=count)
+    # paginate using iter_history (newest -> older) until we collect `count`
+    out = []
+    for m in iter_history(token, channel_id):
+        out.append(m)
+        if len(out) >= count:
+            break
+    return out
 
 def slack_call(token, method, params=None, http_method="GET"):
     """Call Slack Web API with basic 429 handling."""
@@ -220,6 +234,7 @@ def main():
     g.add_argument("--check_valid_bulk", action="store_true", help="Check MANY tokens from --tokens-file")
     g.add_argument("--get_channels", action="store_true", help="List channels")
     g.add_argument("--get_messages", action="store_true", help="Get last 10 messages from --channel")
+  
     g.add_argument("--get_rights", action="store_true", help="Show rights context for --channel")
     g.add_argument("--dump_messages", action="store_true", help="Dump messages from --channel over timeframe")
     
@@ -237,11 +252,15 @@ def main():
     help="When used with --get_channels, only include channels the bot is a member of",
 )
 
+    
 
-    # NEW: bulk input/output options
     p.add_argument("--tokens-file", help="Path to file with one token per line (used with --check_valid_bulk)")
     p.add_argument("--out", help="Write bulk results to this JSONL file (one JSON object per line)")
     p.add_argument("--show-tokens", action="store_true", help="Include raw tokens in output (default masks them)")
+    p.add_argument(
+        "--count", type=int, default=10,
+        help="Number of recent messages to return with --get_messages (default: 10; >1000 will paginate)"
+    )
 
     p.add_argument("--channel", help="Channel ID (C?/G?/D?) or name (e.g. general) when required")
     p.add_argument("--timeframe", type=int, default=1, help="Weeks of history for --dump_messages (default 1)")
@@ -322,9 +341,10 @@ def main():
             if not args.channel:
                 raise ValueError("--channel is required for --get_messages")
             ch_id, ch_label = resolve_channel_id(token, args.channel)
-            msgs = get_last_messages(token, ch_id, limit=10)
+            msgs = get_recent_messages(token, ch_id, count=args.count)
             print(json.dumps(msgs, indent=2) if args.pretty else json.dumps(msgs))
             return
+
 
         if args.get_rights:
             if not args.channel:
